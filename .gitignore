@@ -1,0 +1,23 @@
+# Local build artifacts
+/mcp-hub
+/mcp-hub-bridge
+/mcp-hub-fixture
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/vendor/
+
+# Markdown except README (repo docs stay local)
+*.md
+!README.md
+
+# Local editor / tooling (not part of source)
+.cursor/
+.claude/
+.playwright-cli/

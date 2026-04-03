@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>mcp-hub</title>
+  <style>
+    :root { --bg:#0f1419; --panel:#1a2332; --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --ok:#3fb950; --err:#f85149; }
+    * { box-sizing: border-box; }
+    body { margin:0; font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 1rem 1.5rem; border-bottom: 1px solid #30363d; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:1rem; }
+    h1 { margin:0; font-size:1.25rem; font-weight:600; }
+    .row { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+    input, button, select, textarea { font: inherit; }
+    input[type="password"], input[type="text"] { background:#0d1117; border:1px solid #30363d; color:var(--text); padding:.4rem .6rem; border-radius:6px; min-width:200px; }
+    button { background: var(--accent); color:#fff; border:0; padding:.45rem 1rem; border-radius:6px; cursor:pointer; font-weight:500; }
+    button.secondary { background:#21262d; color:var(--text); }
+    button.danger { background: var(--err); }
+    nav { display:flex; gap:.25rem; padding: .5rem 1rem; border-bottom: 1px solid #30363d; flex-wrap:wrap; }
+    nav button { background:transparent; color:var(--muted); padding:.35rem .75rem; }
+    nav button.active { color: var(--accent); background:#21262d; }
+    main { padding: 1rem 1.5rem; max-width:1200px; margin:0 auto; }
+    .panel { background: var(--panel); border-radius:8px; padding:1rem; margin-bottom:1rem; border:1px solid #30363d; }
+    pre, textarea.code { font-family: ui-monospace, monospace; font-size: 12px; background:#0d1117; padding:1rem; border-radius:6px; overflow:auto; max-height:50vh; width:100%; border:1px solid #30363d; color:var(--text); }
+    textarea.code { min-height:280px; resize:vertical; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .err { color: var(--err); }
+    .ok { color: var(--ok); }
+    table { width:100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align:left; padding:.5rem .6rem; border-bottom:1px solid #30363d; }
+    th { color: var(--muted); font-weight:500; }
+    .hidden { display:none !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>mcp-hub control panel</h1>
+    <div class="row">
+      <label class="muted" for="token">API token</label>
+      <input type="password" id="token" placeholder="Bearer token if hub.api_key is set" autocomplete="off" />
+      <button type="button" class="secondary" id="saveToken">Remember</button>
+    </div>
+  </header>
+  <nav id="nav">
+    <button type="button" data-tab="dash" class="active">Overview</button>
+    <button type="button" data-tab="servers">Servers</button>
+    <button type="button" data-tab="clients">Clients</button>
+    <button type="button" data-tab="sync">Sync</button>
+    <button type="button" data-tab="config">Config YAML</button>
+    <button type="button" data-tab="import">Import</button>
+    <button type="button" data-tab="launch">Launch</button>
+  </nav>
+  <main>
+    <p id="msg" class="muted"></p>
+    <section id="tab-dash" class="panel">
+      <div class="row" style="margin-bottom:1rem;">
+        <button type="button" id="refreshStatus">Refresh status</button>
+        <span id="metaVer" class="muted"></span>
+      </div>
+      <pre id="statusOut">Loading…</pre>
+    </section>
+    <section id="tab-servers" class="panel hidden">
+      <h3 style="margin-top:0">Servers</h3>
+      <table><thead><tr><th>Name</th><th>Mode</th><th>Target</th><th>Lazy</th><th></th></tr></thead><tbody id="serverRows"></tbody></table>
+      <h4>Add server</h4>
+      <div class="row" style="margin-bottom:.5rem;">
+        <input type="text" id="srvName" placeholder="name" />
+        <select id="srvMode"><option value="shared">shared</option><option value="isolated">isolated</option><option value="passthrough">passthrough</option></select>
+      </div>
+      <div class="row" style="margin-bottom:.5rem;">
+        <input type="text" id="srvCmd" placeholder="command" style="flex:1" />
+        <input type="text" id="srvUrl" placeholder="url (passthrough)" style="flex:1" />
+      </div>
+      <button type="button" id="addServer">Add server</button>
+    </section>
+    <section id="tab-clients" class="panel hidden">
+      <h3 style="margin-top:0">Clients</h3>
+      <pre id="clientsOut"></pre>
+      <h4>Add / override client</h4>
+      <div class="row"><input type="text" id="clId" placeholder="id e.g. cursor" /></div>
+      <div class="row"><input type="text" id="clPath" placeholder="config_path" style="flex:1" /></div>
+      <div class="row"><input type="text" id="clKey" placeholder="config_key (default mcpServers)" style="flex:1" /></div>
+      <div class="row"><input type="text" id="clKind" placeholder="kind gui|cli" /></div>
+      <button type="button" id="addClient">Save client</button>
+    </section>
+    <section id="tab-sync" class="panel hidden">
+      <div class="row">
+        <input type="text" id="syncClient" placeholder="client id (empty = all)" />
+        <label class="row"><input type="checkbox" id="syncDry" /> dry-run</label>
+        <button type="button" id="runSync">Run sync</button>
+      </div>
+      <pre id="syncOut"></pre>
+    </section>
+    <section id="tab-config" class="panel hidden">
+      <div class="row" style="margin-bottom:.5rem;">
+        <button type="button" id="loadYaml">Load</button>
+        <button type="button" id="saveYaml">Save &amp; reload hub</button>
+      </div>
+      <textarea class="code" id="yamlEdit" spellcheck="false"></textarea>
+      <p class="muted">Editing YAML rewrites the file and hot-reloads the hub. Placeholders like ${VAR} are preserved when using Load/Save through this API.</p>
+    </section>
+    <section id="tab-import" class="panel hidden">
+      <textarea class="code" id="importJson" placeholder='Paste full JSON: { "mcpServers": { ... } }' style="min-height:160px"></textarea>
+      <div class="row" style="margin-top:.5rem;">
+        <input type="text" id="importClient" placeholder="optional client id for passthrough extras" />
+        <button type="button" id="runImport">Import</button>
+      </div>
+    </section>
+    <section id="tab-launch" class="panel hidden">
+      <div class="row">
+        <input type="text" id="launchId" placeholder="client id" />
+        <button type="button" id="runLaunch">Sync + launch</button>
+      </div>
+      <p class="muted">Runs sync then opens the app (macOS GUI) or executable (CLI).</p>
+    </section>
+  </main>
+  <script>
+    const api = (path, opts = {}) => {
+      const h = { 'Content-Type': 'application/json', ...opts.headers };
+      const t = localStorage.getItem('mcp_hub_token');
+      if (t) h['Authorization'] = 'Bearer ' + t;
+      return fetch(path, { ...opts, headers: h }).then(async r => {
+        const text = await r.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (_) {}
+        if (!r.ok) {
+          if (data && typeof data === 'object') {
+            const msg = data.error ?? data.message ?? data.detail;
+            if (msg) throw new Error(String(msg));
+          }
+          throw new Error((text || r.statusText).trim() || r.statusText);
+        }
+        return data;
+      });
+    };
+    document.getElementById('saveToken').onclick = () => {
+      const v = document.getElementById('token').value.trim();
+      if (v) localStorage.setItem('mcp_hub_token', v); else localStorage.removeItem('mcp_hub_token');
+      setMsg('Token saved in browser localStorage.', false);
+    };
+    const token = localStorage.getItem('mcp_hub_token');
+    if (token) document.getElementById('token').value = token;
+
+    function setMsg(t, isErr) {
+      const el = document.getElementById('msg');
+      el.textContent = t || '';
+      el.className = isErr ? 'err' : 'muted';
+    }
+
+    document.querySelectorAll('#nav button').forEach(b => {
+      b.onclick = () => {
+        document.querySelectorAll('#nav button').forEach(x => x.classList.toggle('active', x === b));
+        const tab = b.dataset.tab;
+        document.querySelectorAll('main > section').forEach(s => s.classList.toggle('hidden', !s.id.endsWith(tab)));
+      };
+    });
+
+    async function refreshMeta() {
+      try {
+        const m = await api('/api/v1/meta');
+        document.getElementById('metaVer').textContent = 'v' + m.version + ' · ' + (m.listen_address || '') + (m.requires_auth ? ' · auth required' : ' · localhost-only admin');
+      } catch (e) { setMsg(e.message, true); }
+    }
+    document.getElementById('refreshStatus').onclick = async () => {
+      try {
+        const s = await api('/api/v1/status');
+        document.getElementById('statusOut').textContent = JSON.stringify(s, null, 2);
+        setMsg('');
+      } catch (e) { setMsg(e.message, true); }
+    };
+    async function loadServers() {
+      try {
+        const d = await api('/api/v1/servers');
+        const tb = document.getElementById('serverRows');
+        tb.innerHTML = '';
+        for (const s of d.servers || []) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td>'+escapeHtml(s.name)+'</td><td>'+escapeHtml(s.mode)+'</td><td>'+escapeHtml(s.target||'')+'</td><td>'+s.lazy+'</td><td><button class="danger sm" data-name="'+escapeHtml(s.name)+'">Remove</button></td>';
+          tr.querySelector('button').onclick = async () => {
+            if (!confirm('Remove '+s.name+'?')) return;
+            try {
+              await api('/api/v1/servers/'+encodeURIComponent(s.name), { method: 'DELETE' });
+              loadServers(); refreshMeta();
+            } catch (e) { setMsg(e.message, true); }
+          };
+          tb.appendChild(tr);
+        }
+      } catch (e) { setMsg(e.message, true); }
+    }
+    function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    document.getElementById('addServer').onclick = async () => {
+      const name = document.getElementById('srvName').value.trim();
+      const mode = document.getElementById('srvMode').value;
+      const command = document.getElementById('srvCmd').value.trim();
+      const url = document.getElementById('srvUrl').value.trim();
+      if (!name) return setMsg('Name required', true);
+      try {
+        await api('/api/v1/servers', { method: 'POST', body: JSON.stringify({ name, mode, command, url }) });
+        setMsg('Server added.');
+        loadServers();
+        document.getElementById('refreshStatus').click();
+      } catch (e) { setMsg(e.message, true); }
+    };
+
+    document.getElementById('runSync').onclick = async () => {
+      const client_id = document.getElementById('syncClient').value.trim();
+      const dry_run = document.getElementById('syncDry').checked;
+      try {
+        const d = await api('/api/v1/sync', { method: 'POST', body: JSON.stringify({ client_id, dry_run }) });
+        document.getElementById('syncOut').textContent = JSON.stringify(d, null, 2);
+        setMsg('');
+      } catch (e) { setMsg(e.message, true); }
+    };
+
+    document.getElementById('loadYaml').onclick = async () => {
+      try {
+        const d = await api('/api/v1/config');
+        document.getElementById('yamlEdit').value = d.yaml || '';
+        setMsg('');
+      } catch (e) { setMsg(e.message, true); }
+    };
+    document.getElementById('saveYaml').onclick = async () => {
+      try {
+        await api('/api/v1/config', { method: 'PUT', body: JSON.stringify({ yaml: document.getElementById('yamlEdit').value }) });
+        setMsg('Saved and hub reloaded.');
+        document.getElementById('refreshStatus').click();
+      } catch (e) { setMsg(e.message, true); }
+    };
+
+    document.getElementById('runImport').onclick = async () => {
+      const json = document.getElementById('importJson').value;
+      const client_id = document.getElementById('importClient').value.trim();
+      try {
+        const d = await api('/api/v1/import', { method: 'POST', body: JSON.stringify({ json, client_id }) });
+        setMsg('Imported ' + d.imported + ' servers.');
+        loadServers();
+        document.getElementById('refreshStatus').click();
+      } catch (e) { setMsg(e.message, true); }
+    };
+
+    document.getElementById('runLaunch').onclick = async () => {
+      const client_id = document.getElementById('launchId').value.trim();
+      if (!client_id) return setMsg('client id required', true);
+      try {
+        await api('/api/v1/launch', { method: 'POST', body: JSON.stringify({ client_id }) });
+        setMsg('Launch command completed.');
+      } catch (e) { setMsg(e.message, true); }
+    };
+
+    document.getElementById('addClient').onclick = async () => {
+      const id = document.getElementById('clId').value.trim();
+      if (!id) return setMsg('id required', true);
+      const config_path = document.getElementById('clPath').value.trim();
+      const config_key = document.getElementById('clKey').value.trim() || 'mcpServers';
+      const kind = document.getElementById('clKind').value.trim() || 'gui';
+      try {
+        await api('/api/v1/clients', { method: 'POST', body: JSON.stringify({
+          id,
+          display_name: id,
+          kind,
+          config_path,
+          config_key,
+          url_key: 'url',
+          file_mode: 'standalone',
+          format: 'json',
+          adapter_mode: 'direct-http'
+        })});
+        setMsg('Client saved.');
+        const d = await api('/api/v1/clients');
+        document.getElementById('clientsOut').textContent = JSON.stringify(d, null, 2);
+      } catch (e) { setMsg(e.message, true); }
+    };
+
+    refreshMeta();
+    document.getElementById('refreshStatus').click();
+    loadServers();
+    api('/api/v1/clients').then(d => { document.getElementById('clientsOut').textContent = JSON.stringify(d, null, 2); }).catch(() => {});
+
+    window.addEventListener('focus', () => { document.getElementById('refreshStatus').click(); });
+  </script>
+</body>
+</html>
