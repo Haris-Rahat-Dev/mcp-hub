@@ -21,3 +21,20 @@
 .cursor/
 .claude/
 .playwright-cli/
+
+# Frontend dependencies and generated output
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/dist/
+
+# Wails build outputs
+build/bin/
+
+# Local environment and OS junk
+.env
+.env.*
+.DS_Store
+
+# Logs and temp files
+*.log
+tmp/

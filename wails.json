@@ -1,0 +1,11 @@
+{
+  "name": "mcp-hub",
+  "outputfilename": "mcp-hub-gui",
+  "frontend:install": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:url": "",
+  "frontend:dist": "./frontend/dist",
+  "wailsjsdir": "./frontend/src/lib/wails",
+  "version": "2",
+  "outputType": "app"
+}
