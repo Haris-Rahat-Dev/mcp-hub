@@ -33,7 +33,7 @@ func runLaunch(args []string) error {
 
 	// Step 1: Ensure hub is running.
 	if err := ensureHubRunning(cfg, *configPath); err != nil {
-		return fmt.Errorf("hub is not reachable: %w\nRun 'mcp-hub start' to start the hub.", err)
+		return fmt.Errorf("hub is not reachable: %w; run 'mcp-hub start' to start the hub", err)
 	}
 
 	// Step 2: Sync client config unless --no-sync.

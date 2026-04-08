@@ -25,14 +25,16 @@ type isolatedSession struct {
 	engine     *multiplex.Engine
 	initResult json.RawMessage
 
-	starting   bool
-	startWait  chan struct{}
-	status     string
-	lastError  string
-	restarts   int
-	stopping   bool
-	lastPingMs int64
-	lastPingAt time.Time
+	starting      bool
+	startWait     chan struct{}
+	status        string
+	lastError     string
+	restarts      int
+	stopping      bool
+	lastPingMs    int64
+	lastPingAt    time.Time
+	startedAt     time.Time
+	lastRestartAt time.Time
 
 	// ctx/cancel allow reverse-request waiters to unblock when the session
 	// is torn down, preventing goroutine leaks (fix 0d).
@@ -248,6 +250,7 @@ func (s *isolatedServer) startSessionProcess(ctx context.Context, sessionID stri
 	current.lastError = ""
 	current.lastPingAt = time.Time{}
 	current.lastPingMs = 0
+	current.startedAt = time.Now()
 	s.mu.Unlock()
 
 	go s.watchProcess(sessionID, proc)
@@ -311,6 +314,7 @@ func (s *isolatedServer) watchProcess(sessionID string, proc *process.ManagedPro
 	current.restarts++
 	current.status = "restarting"
 	current.lastError = fmt.Sprintf("process exited: %v", err)
+	current.lastRestartAt = time.Now()
 	attempt := current.restarts
 	s.mu.Unlock()
 
@@ -514,6 +518,8 @@ func (s *isolatedServer) statusSnapshot() ServerStatus {
 	restarts := 0
 	lastPingMs := int64(0)
 	lastPingAt := time.Time{}
+	lastRestartAt := time.Time{}
+	uptimeSec := int64(0)
 
 	for _, sess := range s.sessions {
 		if sess.process != nil {
@@ -526,23 +532,31 @@ func (s *isolatedServer) statusSnapshot() ServerStatus {
 			lastError = sess.lastError
 		}
 		restarts += sess.restarts
+		if sess.lastRestartAt.After(lastRestartAt) {
+			lastRestartAt = sess.lastRestartAt
+		}
 		if sess.lastPingAt.After(lastPingAt) {
 			lastPingAt = sess.lastPingAt
 			lastPingMs = sess.lastPingMs
 		}
+		if u := uptimeSeconds(sess.startedAt); u > uptimeSec {
+			uptimeSec = u
+		}
 	}
 
 	return ServerStatus{
-		Name:      s.name,
-		Mode:      s.def.Mode,
-		Status:    status,
-		PID:       0,
-		Clients:   clients,
-		Restarts:  restarts,
-		LastError: lastError,
-		Lazy:      s.def.IsLazy(),
-		LastPingMs: lastPingMs,
-		LastPingAt: formatTime(lastPingAt),
+		Name:          s.name,
+		Mode:          s.def.Mode,
+		Status:        status,
+		PID:           0,
+		Clients:       clients,
+		Restarts:      restarts,
+		UptimeSec:     uptimeSec,
+		LastRestartAt: formatTime(lastRestartAt),
+		LastError:     lastError,
+		Lazy:          s.def.IsLazy(),
+		LastPingMs:    lastPingMs,
+		LastPingAt:    formatTime(lastPingAt),
 	}
 }
 
@@ -599,4 +613,3 @@ func idKey(raw json.RawMessage) string {
 	}
 	return string(normalized)
 }
-

@@ -150,4 +150,3 @@ func streamNotifications(ctx context.Context, client *http.Client, target, apiKe
 		time.Sleep(250 * time.Millisecond)
 	}
 }
-

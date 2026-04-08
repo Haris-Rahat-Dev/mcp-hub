@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -24,24 +25,28 @@ type passthroughSession struct {
 }
 
 type passthroughServer struct {
-	name   string
-	def    config.ServerConfig
-	logger *log.Logger
-	client *http.Client
+	name         string
+	def          config.ServerConfig
+	logger       *log.Logger
+	client       *http.Client
 	streamClient *http.Client
 
-	mu       sync.Mutex
-	sessions map[string]*passthroughSession
+	mu            sync.Mutex
+	sessions      map[string]*passthroughSession
+	reconnects    int
+	lastError     string
+	startedAt     time.Time
+	lastRestartAt time.Time
 }
 
 func newPassthroughServer(name string, def config.ServerConfig, logger *log.Logger) *passthroughServer {
 	return &passthroughServer{
-		name:     name,
-		def:      def,
-		logger:   logger,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		name:         name,
+		def:          def,
+		logger:       logger,
+		client:       &http.Client{Timeout: 30 * time.Second},
 		streamClient: &http.Client{},
-		sessions: map[string]*passthroughSession{},
+		sessions:     map[string]*passthroughSession{},
 	}
 }
 
@@ -70,6 +75,9 @@ func (s *passthroughServer) handleRequest(ctx context.Context, sessionID string,
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		s.mu.Lock()
+		s.lastError = err.Error()
+		s.mu.Unlock()
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -83,6 +91,9 @@ func (s *passthroughServer) handleRequest(ctx context.Context, sessionID string,
 		return nil, err
 	}
 	if resp.StatusCode >= 300 {
+		s.mu.Lock()
+		s.lastError = fmt.Sprintf("passthrough request failed: %s", resp.Status)
+		s.mu.Unlock()
 		return nil, fmt.Errorf("passthrough request failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	return body, nil
@@ -139,6 +150,9 @@ func (s *passthroughServer) deleteSession(sessionID string) {
 		close(ch)
 	}
 	delete(s.sessions, sessionID)
+	if len(s.sessions) == 0 {
+		s.startedAt = time.Time{}
+	}
 	s.mu.Unlock()
 
 	if upstreamSessionID != "" {
@@ -163,14 +177,16 @@ func (s *passthroughServer) statusSnapshot() ServerStatus {
 		status = "running"
 	}
 	return ServerStatus{
-		Name:      s.name,
-		Mode:      s.def.Mode,
-		Status:    status,
-		PID:       0,
-		Clients:   len(s.sessions),
-		Restarts:  0,
-		LastError: "",
-		Lazy:      s.def.IsLazy(),
+		Name:          s.name,
+		Mode:          s.def.Mode,
+		Status:        status,
+		PID:           0,
+		Clients:       len(s.sessions),
+		Restarts:      s.reconnects,
+		UptimeSec:     uptimeSeconds(s.startedAt),
+		LastRestartAt: formatTime(s.lastRestartAt),
+		LastError:     s.lastError,
+		Lazy:          s.def.IsLazy(),
 	}
 }
 
@@ -208,6 +224,7 @@ func (s *passthroughServer) streamSession(ctx context.Context, sessionID string)
 
 		resp, err := s.streamClient.Do(req)
 		if err != nil {
+			s.recordStreamFailure(err)
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
@@ -240,6 +257,11 @@ func (s *passthroughServer) streamSession(ctx context.Context, sessionID string)
 			}
 		}
 		_ = resp.Body.Close()
+		if err := scanner.Err(); err != nil {
+			s.recordStreamFailure(err)
+		} else {
+			s.recordStreamFailure(errors.New("passthrough SSE stream closed"))
+		}
 		time.Sleep(250 * time.Millisecond)
 	}
 }
@@ -296,12 +318,26 @@ func (s *passthroughServer) applyForwardHeaders(req *http.Request) {
 func (s *passthroughServer) ensureSessionLocked(sessionID string) *passthroughSession {
 	current, ok := s.sessions[sessionID]
 	if !ok {
+		if len(s.sessions) == 0 {
+			s.startedAt = time.Now()
+			s.lastError = ""
+			s.reconnects = 0
+			s.lastRestartAt = time.Time{}
+		}
 		current = &passthroughSession{
 			subscribers: map[uint64]chan []byte{},
 		}
 		s.sessions[sessionID] = current
 	}
 	return current
+}
+
+func (s *passthroughServer) recordStreamFailure(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reconnects++
+	s.lastRestartAt = time.Now()
+	s.lastError = fmt.Sprintf("stream reconnect: %v", err)
 }
 
 func (s *passthroughServer) sessionIDs() []string {
@@ -315,4 +351,3 @@ func (s *passthroughServer) sessionIDs() []string {
 }
 
 var _ serverRuntime = (*passthroughServer)(nil)
-

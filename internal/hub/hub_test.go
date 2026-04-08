@@ -123,6 +123,29 @@ func TestHubRestartsSharedServerAfterCrash(t *testing.T) {
 	for time.Now().Before(deadline) {
 		body, err := postJSON(client, baseURL+"/mcp/fixture", sessionID, `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"echo","arguments":{"value":"after-restart"}}}`)
 		if err == nil && strings.Contains(string(body), "after-restart") {
+			statusReq, reqErr := http.NewRequest(http.MethodGet, baseURL+"/status", nil)
+			if reqErr != nil {
+				t.Fatalf("build status request: %v", reqErr)
+			}
+			statusResp, reqErr := client.Do(statusReq)
+			if reqErr != nil {
+				t.Fatalf("status request failed: %v", reqErr)
+			}
+			defer statusResp.Body.Close()
+			var snapshot hub.StatusSnapshot
+			if err := json.NewDecoder(statusResp.Body).Decode(&snapshot); err != nil {
+				t.Fatalf("decode status: %v", err)
+			}
+			if len(snapshot.Servers) != 1 {
+				t.Fatalf("expected one server status, got %#v", snapshot.Servers)
+			}
+			s := snapshot.Servers[0]
+			if s.Restarts > 0 && s.LastRestartAt == "" {
+				t.Fatalf("expected last_restart_at when restarts > 0, got %#v", s)
+			}
+			if s.UptimeSec < 0 {
+				t.Fatalf("expected non-negative uptime, got %d", s.UptimeSec)
+			}
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -373,6 +396,44 @@ func TestHubRoutesReverseRequestForSharedSession(t *testing.T) {
 	}
 }
 
+func TestSharedReverseRequestUnblocksOnDelete(t *testing.T) {
+	testHub, baseURL := newTestHubWithMode(t, config.ModeShared)
+	defer testHub.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	sessionID := initializeSession(t, client, baseURL, "alpha")
+	streamResp := openStream(t, client, baseURL, sessionID)
+	defer streamResp.Body.Close()
+
+	type callResult struct {
+		body []byte
+		err  error
+	}
+	callCh := make(chan callResult, 1)
+	go func() {
+		body, err := postJSON(client, baseURL+"/mcp/fixture", sessionID, `{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"reverse","arguments":{}}}`)
+		callCh <- callResult{body: body, err: err}
+	}()
+
+	_ = readStreamDataMatchingMethod(t, streamResp.Body, "roots/list")
+
+	if err := deleteSession(client, baseURL+"/mcp/fixture", sessionID); err != nil {
+		t.Fatalf("delete session failed: %v", err)
+	}
+
+	select {
+	case result := <-callCh:
+		if result.err != nil {
+			t.Fatalf("reverse tools/call transport failed: %v", result.err)
+		}
+		if !strings.Contains(string(result.body), `"reverse_response":null`) {
+			t.Fatalf("expected shared reverse call to unblock with null reverse_response after delete, got %s", result.body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shared reverse request did not unblock after DeleteSession")
+	}
+}
+
 func TestHubPassthroughProxiesPostStreamDelete(t *testing.T) {
 	var mu sync.Mutex
 	upstreamSessionID := "upstream-session-1"
@@ -569,6 +630,120 @@ func TestHubAggregatedInitializeFailsWhenAnyBackendFails(t *testing.T) {
 		t.Fatalf("tools/list failed: %v", err)
 	}
 	assertResponseHasRPCError(t, toolsResp, 2, -32002)
+}
+
+func TestHubAggregatedInitializeConcurrentFailureReturnsErrorForWaiters(t *testing.T) {
+	testHub, baseURL := newTestHubWithServers(t, map[string]config.ServerConfig{
+		"broken": {
+			Command: filepath.Join(t.TempDir(), "missing-binary"),
+			Mode:    config.ModeShared,
+		},
+		"fixture": {
+			Command: fixtureBinary(t),
+			Mode:    config.ModeShared,
+		},
+	})
+	defer testHub.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	sessionID := "agg-race-fail"
+	payload := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+
+	call := func() []byte {
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/mcp", strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("build init request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Mcp-Session-Id", sessionID)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("send init request: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("init status=%d body=%s", resp.StatusCode, body)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read init response: %v", err)
+		}
+		return body
+	}
+
+	bodyCh := make(chan []byte, 2)
+	go func() { bodyCh <- call() }()
+	go func() { bodyCh <- call() }()
+
+	first := <-bodyCh
+	second := <-bodyCh
+
+	assertResponseHasRPCError(t, first, 1, -32000)
+	assertResponseHasRPCError(t, second, 1, -32000)
+	if strings.Contains(string(first), `"result"`) || strings.Contains(string(second), `"result"`) {
+		t.Fatalf("expected both concurrent initialize calls to fail, got first=%s second=%s", first, second)
+	}
+}
+
+func TestHubStatusReportsAggregateSessionCounters(t *testing.T) {
+	testHub, baseURL := newTestHubWithMode(t, config.ModeShared)
+	defer testHub.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	initReq, err := http.NewRequest(http.MethodPost, baseURL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	if err != nil {
+		t.Fatalf("build init request: %v", err)
+	}
+	initReq.Header.Set("Content-Type", "application/json")
+	initResp, err := client.Do(initReq)
+	if err != nil {
+		t.Fatalf("send init request: %v", err)
+	}
+	defer initResp.Body.Close()
+	if initResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(initResp.Body)
+		t.Fatalf("init status=%d body=%s", initResp.StatusCode, body)
+	}
+	sessionID := initResp.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatalf("expected aggregate session id")
+	}
+
+	statusReq, err := http.NewRequest(http.MethodGet, baseURL+"/status", nil)
+	if err != nil {
+		t.Fatalf("build status request: %v", err)
+	}
+	statusResp, err := client.Do(statusReq)
+	if err != nil {
+		t.Fatalf("status request failed: %v", err)
+	}
+	defer statusResp.Body.Close()
+	var snap hub.StatusSnapshot
+	if err := json.NewDecoder(statusResp.Body).Decode(&snap); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if snap.AggregateSessions != 1 || snap.AggregateInitialized != 1 || snap.AggregateInitInProgress != 0 {
+		t.Fatalf("unexpected aggregate counters: %#v", snap)
+	}
+
+	if err := deleteSession(client, baseURL+"/mcp", sessionID); err != nil {
+		t.Fatalf("delete aggregate session: %v", err)
+	}
+
+	statusResp2, err := client.Do(statusReq)
+	if err != nil {
+		t.Fatalf("status request after delete failed: %v", err)
+	}
+	defer statusResp2.Body.Close()
+	var snap2 hub.StatusSnapshot
+	if err := json.NewDecoder(statusResp2.Body).Decode(&snap2); err != nil {
+		t.Fatalf("decode status after delete: %v", err)
+	}
+	if snap2.AggregateSessions != 0 || snap2.AggregateInitialized != 0 || snap2.AggregateInitializationErr != 0 {
+		t.Fatalf("expected cleared aggregate counters after delete, got %#v", snap2)
+	}
 }
 
 func initializeSession(t *testing.T, client *http.Client, baseURL, value string) string {

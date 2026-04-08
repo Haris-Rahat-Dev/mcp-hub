@@ -257,18 +257,27 @@ func runStatus(args []string) error {
 	}
 
 	fmt.Printf("mcp-hub %s — %s\n\n", snapshot.Version, snapshot.Address)
+	fmt.Printf(
+		"Aggregate sessions: %d (initialized: %d, initializing: %d, init_errors: %d)\n\n",
+		snapshot.AggregateSessions,
+		snapshot.AggregateInitialized,
+		snapshot.AggregateInitInProgress,
+		snapshot.AggregateInitializationErr,
+	)
 	writer := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "SERVER\tMODE\tSTATUS\tPID\tCLIENTS\tRESTARTS\tPING_MS\tLAST_PING\tLAST ERROR")
+	fmt.Fprintln(writer, "SERVER\tMODE\tSTATUS\tPID\tCLIENTS\tRESTARTS\tUPTIME_S\tLAST_RESTART\tPING_MS\tLAST_PING\tLAST ERROR")
 	for _, server := range snapshot.Servers {
 		fmt.Fprintf(
 			writer,
-			"%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\n",
+			"%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\t%s\n",
 			server.Name,
 			server.Mode,
 			server.Status,
 			server.PID,
 			server.Clients,
 			server.Restarts,
+			server.UptimeSec,
+			server.LastRestartAt,
 			server.LastPingMs,
 			server.LastPingAt,
 			server.LastError,

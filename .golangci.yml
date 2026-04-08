@@ -1,0 +1,60 @@
+# golangci-lint configuration
+# Run: make lint
+
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  go: "1.21"
+  build-tags:
+    - exclude_wails
+
+linters:
+  default: none
+  enable:
+    - govet         # Reports suspicious constructs
+    - ineffassign   # Detects unused variable assignments
+    - staticcheck   # Static analysis checks
+    - bodyclose     # Checks whether HTTP response body is closed
+    - exhaustive    # Check exhaustiveness of enum switch statements
+    - misspell      # Finds commonly misspelled English words
+    - nakedret      # Finds naked returns in long functions
+    - prealloc      # Finds slice declarations that could be preallocated
+    - whitespace    # Checks for unnecessary whitespace
+
+linters-settings:
+  govet:
+    enable-all: true
+  misspell:
+    locale: US
+  nakedret:
+    max-func-lines: 30
+  prealloc:
+    preset: none
+
+formatters:
+  enable:
+    - gofmt
+
+  settings:
+    gofmt:
+      simplify: true
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  # Excluded paths (generated code, vendor, etc.)
+  exclude-paths:
+    - "**/vendor/**"
+    - "**/node_modules/**"
+    - "**/dist/**"
+    - "**/wails.go"
+    - "**/mcp-hub-gui" # Wails generated
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true

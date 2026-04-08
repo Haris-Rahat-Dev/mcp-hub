@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -160,5 +161,77 @@ servers:
 	want := "Bearer " + token
 	if auth != want {
 		t.Fatalf("Authorization header = %q, want %q", auth, want)
+	}
+}
+
+func TestStatusPrintsAggregateCounters(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	host, portStr, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portNum, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"version":"0.test",
+			"address":"` + host + `:` + portStr + `",
+			"aggregate_sessions":3,
+			"aggregate_initialized":2,
+			"aggregate_init_in_progress":1,
+			"aggregate_initialization_errors":1,
+			"servers":[]
+		}`))
+	})
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, testConfigFile)
+	raw := fmt.Sprintf(`hub:
+  host: %s
+  port: %d
+servers:
+  s1:
+    command: /bin/true
+`, host, portNum)
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	ctx := context.Background()
+	runErr := Run(ctx, []string{"status", testFlagConfig, cfgPath})
+	_ = w.Close()
+	out, readErr := io.ReadAll(r)
+	if readErr != nil {
+		t.Fatalf("read captured output: %v", readErr)
+	}
+	if runErr != nil {
+		t.Fatalf("Run status: %v", runErr)
+	}
+
+	got := string(out)
+	want := "Aggregate sessions: 3 (initialized: 2, initializing: 1, init_errors: 1)"
+	if !strings.Contains(got, want) {
+		t.Fatalf("status output missing aggregate counters\nwant substring: %q\ngot:\n%s", want, got)
 	}
 }

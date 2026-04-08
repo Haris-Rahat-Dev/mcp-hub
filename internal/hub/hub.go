@@ -27,12 +27,13 @@ var (
 )
 
 type Hub struct {
-	cfg       config.Config
-	logger    *log.Logger
-	serversMu sync.RWMutex
-	servers   map[string]serverRuntime
-	mu        sync.Mutex
+	cfg         config.Config
+	logger      *log.Logger
+	serversMu   sync.RWMutex
+	servers     map[string]serverRuntime
+	mu          sync.Mutex
 	aggInit     map[string]bool
+	aggInitErr  map[string]string
 	aggInitWait map[string]chan struct{}
 	// clientSessions tracks which client ids are associated with which session ids.
 	// Key: clientID → set of sessionIDs.
@@ -42,9 +43,13 @@ type Hub struct {
 }
 
 type StatusSnapshot struct {
-	Version string         `json:"version"`
-	Address string         `json:"address"`
-	Servers []ServerStatus `json:"servers"`
+	Version                    string         `json:"version"`
+	Address                    string         `json:"address"`
+	Servers                    []ServerStatus `json:"servers"`
+	AggregateSessions          int            `json:"aggregate_sessions"`
+	AggregateInitialized       int            `json:"aggregate_initialized"`
+	AggregateInitInProgress    int            `json:"aggregate_init_in_progress"`
+	AggregateInitializationErr int            `json:"aggregate_initialization_errors"`
 }
 
 // ClientSessionCount reports how many sessions a specific client has on a server.
@@ -60,6 +65,8 @@ type ServerStatus struct {
 	PID            int                  `json:"pid,omitempty"`
 	Clients        int                  `json:"clients"`
 	Restarts       int                  `json:"restarts"`
+	UptimeSec      int64                `json:"uptime_sec,omitempty"`
+	LastRestartAt  string               `json:"last_restart_at,omitempty"`
 	LastError      string               `json:"last_error,omitempty"`
 	Lazy           bool                 `json:"lazy"`
 	LastPingMs     int64                `json:"last_ping_ms,omitempty"`
@@ -83,6 +90,11 @@ type session struct {
 	subscribers map[uint64]chan []byte
 }
 
+type reverseWaiter struct {
+	sessionID string
+	ch        chan []byte
+}
+
 type sharedServer struct {
 	name       string
 	def        config.ServerConfig
@@ -101,10 +113,12 @@ type sharedServer struct {
 	restarts             int
 	stopping             bool
 	stopRestart          chan struct{}
-	reverseReq           map[string]chan []byte
+	reverseReq           map[string]reverseWaiter
 	progressByToken      map[string]string
 	lastPingMs           int64
 	lastPingAt           time.Time
+	startedAt            time.Time
+	lastRestartAt        time.Time
 	requestMu            sync.Mutex
 	activeReverseSession string
 }
@@ -122,6 +136,7 @@ func New(cfg config.Config, logger *log.Logger) *Hub {
 		logger:         logger,
 		servers:        map[string]serverRuntime{},
 		aggInit:        map[string]bool{},
+		aggInitErr:     map[string]string{},
 		aggInitWait:    map[string]chan struct{}{},
 		clientSessions: map[string]map[string]bool{},
 		sessionClient:  map[string]string{},
@@ -215,7 +230,19 @@ func (h *Hub) HandleAggregateRequest(ctx context.Context, sessionID string, raw 
 			case <-ctx.Done():
 				return sessionID, nil, ctx.Err()
 			}
-			// Another caller already initialized; return cached result.
+			// Another caller already finished initialize for this session.
+			// Return success only if that initialize succeeded.
+			h.mu.Lock()
+			ok := h.aggInit[sessionID]
+			initErr := h.aggInitErr[sessionID]
+			h.mu.Unlock()
+			if !ok {
+				if initErr == "" {
+					initErr = "aggregate initialize failed"
+				}
+				resp, err := protocol.NewErrorResponse(*env.ID, -32000, initErr)
+				return sessionID, resp, err
+			}
 			result := json.RawMessage(`{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"mcp-hub","version":"0.1.0"}}`)
 			resp, err := protocol.NewSuccessResponse(*env.ID, result)
 			return sessionID, resp, err
@@ -246,6 +273,10 @@ func (h *Hub) HandleAggregateRequest(ctx context.Context, sessionID string, raw 
 		delete(h.aggInitWait, sessionID)
 		if initErr == nil {
 			h.aggInit[sessionID] = true
+			delete(h.aggInitErr, sessionID)
+		} else {
+			h.aggInit[sessionID] = false
+			h.aggInitErr[sessionID] = initErr.Error()
 		}
 		close(gate)
 		h.mu.Unlock()
@@ -348,6 +379,7 @@ func (h *Hub) DeleteAggregateSession(sessionID string) error {
 	}
 	h.mu.Lock()
 	delete(h.aggInit, sessionID)
+	delete(h.aggInitErr, sessionID)
 	delete(h.aggInitWait, sessionID)
 	h.mu.Unlock()
 	return nil
@@ -364,10 +396,26 @@ func (h *Hub) Status() StatusSnapshot {
 		}
 	}
 
+	h.mu.Lock()
+	aggSessions := len(h.aggInit)
+	aggInitialized := 0
+	for _, initialized := range h.aggInit {
+		if initialized {
+			aggInitialized++
+		}
+	}
+	aggInProgress := len(h.aggInitWait)
+	aggErrors := len(h.aggInitErr)
+	h.mu.Unlock()
+
 	return StatusSnapshot{
-		Version: Version,
-		Address: h.cfg.Hub.ListenAddress(),
-		Servers: servers,
+		Version:                    Version,
+		Address:                    h.cfg.Hub.ListenAddress(),
+		Servers:                    servers,
+		AggregateSessions:          aggSessions,
+		AggregateInitialized:       aggInitialized,
+		AggregateInitInProgress:    aggInProgress,
+		AggregateInitializationErr: aggErrors,
 	}
 }
 
@@ -383,6 +431,7 @@ func (h *Hub) ensureAggregateSessionID(existing string) string {
 	}
 	if _, ok := h.aggInit[existing]; !ok {
 		h.aggInit[existing] = false
+		delete(h.aggInitErr, existing)
 	}
 	return existing
 }
@@ -583,7 +632,7 @@ func newSharedServer(name string, def config.ServerConfig, logger *log.Logger) *
 		sessions:        map[string]*session{},
 		status:          "idle",
 		stopRestart:     make(chan struct{}),
-		reverseReq:      map[string]chan []byte{},
+		reverseReq:      map[string]reverseWaiter{},
 		progressByToken: map[string]string{},
 	}
 	if def.Mode != config.ModeShared {
@@ -763,6 +812,7 @@ func (s *sharedServer) startProcess(ctx context.Context) error {
 	s.lastError = ""
 	s.lastPingAt = time.Time{}
 	s.lastPingMs = 0
+	s.startedAt = time.Now()
 	s.mu.Unlock()
 
 	go s.watchProcess(proc)
@@ -827,6 +877,7 @@ func (s *sharedServer) watchProcess(proc *process.ManagedProcess) {
 	s.restarts++
 	s.status = "restarting"
 	s.lastError = fmt.Sprintf("process exited: %v", err)
+	s.lastRestartAt = time.Now()
 	attempt := s.restarts
 	// Purge stale subscriber channels so SSE goroutines from the old process
 	// drain and exit rather than accumulating alongside new subscribers (fix 0b).
@@ -864,11 +915,17 @@ func (s *sharedServer) handleReverseRequest(raw []byte) ([]byte, error) {
 	if !isSupportedReverseMethod(env.Method) {
 		return protocol.NewErrorResponse(*env.ID, -32601, "reverse method is not supported")
 	}
+	targetSession, err := s.resolveReverseTargetSession(raw)
+	if err != nil {
+		return protocol.NewErrorResponse(*env.ID, -32001, err.Error())
+	}
 	waitCh := make(chan []byte, 1)
 	key := idKey(*env.ID)
 	s.mu.Lock()
-	s.reverseReq[key] = waitCh
-	targetSession := s.activeReverseSession
+	s.reverseReq[key] = reverseWaiter{
+		sessionID: targetSession,
+		ch:        waitCh,
+	}
 	s.mu.Unlock()
 	s.broadcastNotificationToSession(raw, targetSession)
 
@@ -888,7 +945,7 @@ func (s *sharedServer) handleReverseRequest(raw []byte) ([]byte, error) {
 
 func (s *sharedServer) resolveReverseRequest(responseID string, raw []byte) bool {
 	s.mu.Lock()
-	ch, ok := s.reverseReq[responseID]
+	waiter, ok := s.reverseReq[responseID]
 	if ok {
 		delete(s.reverseReq, responseID)
 	}
@@ -896,8 +953,8 @@ func (s *sharedServer) resolveReverseRequest(responseID string, raw []byte) bool
 	if !ok {
 		return false
 	}
-	ch <- append([]byte(nil), raw...)
-	close(ch)
+	waiter.ch <- append([]byte(nil), raw...)
+	close(waiter.ch)
 	return true
 }
 
@@ -957,6 +1014,17 @@ func (s *sharedServer) deleteSession(sessionID string) {
 		}
 		delete(s.sessions, sessionID)
 	}
+	for tok, sid := range s.progressByToken {
+		if sid == sessionID {
+			delete(s.progressByToken, tok)
+		}
+	}
+	for id, waiter := range s.reverseReq {
+		if waiter.sessionID == sessionID {
+			delete(s.reverseReq, id)
+			close(waiter.ch)
+		}
+	}
 	// Signal any in-progress restart backoff to abort (fix 0a). Replace the
 	// channel so future restarts get a fresh signal.
 	close(s.stopRestart)
@@ -1015,16 +1083,18 @@ func (s *sharedServer) statusSnapshot() ServerStatus {
 	}
 
 	return ServerStatus{
-		Name:       s.name,
-		Mode:       s.def.Mode,
-		Status:     status,
-		PID:        pid,
-		Clients:    len(s.sessions),
-		Restarts:   s.restarts,
-		LastError:  s.lastError,
-		Lazy:       s.def.IsLazy(),
-		LastPingMs: s.lastPingMs,
-		LastPingAt: formatTime(s.lastPingAt),
+		Name:          s.name,
+		Mode:          s.def.Mode,
+		Status:        status,
+		PID:           pid,
+		Clients:       len(s.sessions),
+		Restarts:      s.restarts,
+		UptimeSec:     uptimeSeconds(s.startedAt),
+		LastRestartAt: formatTime(s.lastRestartAt),
+		LastError:     s.lastError,
+		Lazy:          s.def.IsLazy(),
+		LastPingMs:    s.lastPingMs,
+		LastPingAt:    formatTime(s.lastPingAt),
 	}
 }
 
@@ -1043,6 +1113,7 @@ func (s *sharedServer) close() error {
 	s.stopping = true
 	proc := s.process
 	s.process = nil
+	s.startedAt = time.Time{}
 	for sessionID, current := range s.sessions {
 		for id, ch := range current.subscribers {
 			delete(current.subscribers, id)
@@ -1050,9 +1121,9 @@ func (s *sharedServer) close() error {
 		}
 		delete(s.sessions, sessionID)
 	}
-	for id, ch := range s.reverseReq {
+	for id, waiter := range s.reverseReq {
 		delete(s.reverseReq, id)
-		close(ch)
+		close(waiter.ch)
 	}
 	clear(s.progressByToken)
 	// Interrupt any pending restart backoff goroutine (fix 0a).
@@ -1084,6 +1155,40 @@ func isSupportedReverseMethod(method string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (s *sharedServer) resolveReverseTargetSession(raw []byte) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if tok, ok := progressTokenFromRequest(raw); ok {
+		if sid, found := s.progressByToken[tok]; found {
+			if sess, ok := s.sessions[sid]; ok && sess.initialized {
+				return sid, nil
+			}
+		}
+	}
+
+	if sid := s.activeReverseSession; sid != "" {
+		if sess, ok := s.sessions[sid]; ok && sess.initialized {
+			return sid, nil
+		}
+	}
+
+	initialized := make([]string, 0, len(s.sessions))
+	for sid, sess := range s.sessions {
+		if sess.initialized {
+			initialized = append(initialized, sid)
+		}
+	}
+	switch len(initialized) {
+	case 0:
+		return "", errors.New("no initialized client session available for reverse request")
+	case 1:
+		return initialized[0], nil
+	default:
+		return "", errors.New("multiple initialized sessions available; reverse request target is ambiguous")
 	}
 }
 
@@ -1199,4 +1304,15 @@ func formatTime(t time.Time) string {
 		return ""
 	}
 	return t.Format(time.RFC3339)
+}
+
+func uptimeSeconds(start time.Time) int64 {
+	if start.IsZero() {
+		return 0
+	}
+	sec := int64(time.Since(start).Seconds())
+	if sec < 0 {
+		return 0
+	}
+	return sec
 }

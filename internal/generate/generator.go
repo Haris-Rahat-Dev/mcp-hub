@@ -370,29 +370,27 @@ func mergeServerSections(existingSection any, hubServers map[string]any) (map[st
 
 	existingMap, _ := existingSection.(map[string]any)
 
-	if existingMap != nil {
-		for name, raw := range existingMap {
-			entry, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if isHubManagedEntry(entry) {
-				// Preserve app-specific extra fields from the old managed entry
-				// so they survive the replacement (fix 0f). Hub-canonical
-				// transport keys are overwritten by the new entry below.
-				if newEntry, isNew := hubServers[name]; isNew {
-					newEntryMap, ok := newEntry.(map[string]any)
-					if ok {
-						merged[name] = mergePreservingExtras(entry, newEntryMap)
-					} else {
-						merged[name] = newEntry
-					}
-				}
-				continue
-			}
-			merged[name] = entry
-			preserved++
+	for name, raw := range existingMap {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
 		}
+		if isHubManagedEntry(entry) {
+			// Preserve app-specific extra fields from the old managed entry
+			// so they survive the replacement (fix 0f). Hub-canonical
+			// transport keys are overwritten by the new entry below.
+			if newEntry, isNew := hubServers[name]; isNew {
+				newEntryMap, ok := newEntry.(map[string]any)
+				if ok {
+					merged[name] = mergePreservingExtras(entry, newEntryMap)
+				} else {
+					merged[name] = newEntry
+				}
+			}
+			continue
+		}
+		merged[name] = entry
+		preserved++
 	}
 
 	for name, entry := range hubServers {
@@ -462,7 +460,7 @@ func readJSONFile(path string) (map[string]any, error) {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return map[string]any{}, nil
 	}
-	
+
 	// Strip comments and trailing commas so standard encoding/json can parse it
 	data = sanitizeJSON(data)
 

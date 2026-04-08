@@ -203,7 +203,7 @@ func deliverReverseResponse(encoder *json.Encoder, rawID json.RawMessage, msg en
 		_ = json.Unmarshal(msg.Result, &result)
 	}
 	respond(encoder, &requestID, map[string]any{
-		"ok":              true,
+		"ok":               true,
 		"reverse_response": result,
 	}, nil)
 	return true

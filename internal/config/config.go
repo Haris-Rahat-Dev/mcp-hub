@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -87,16 +88,40 @@ func ResolveConfigPath(path string) (string, error) {
 		return "", err
 	}
 
-	candidates := []string{
-		filepath.Join(home, ".config", "mcp-hub", "config.yaml"),
-		filepath.Join(home, ".mcp-hub", "config.yaml"),
-	}
+	candidates := platformConfigCandidates(home)
 	for _, candidate := range candidates {
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, nil
 		}
 	}
 	return candidates[0], nil
+}
+
+func platformConfigCandidates(home string) []string {
+	if runtime.GOOS == "windows" {
+		appdata := os.Getenv("APPDATA")
+		if appdata != "" {
+			return []string{
+				filepath.Join(appdata, "mcp-hub", "config.yaml"),
+				filepath.Join(home, ".config", "mcp-hub", "config.yaml"),
+				filepath.Join(home, ".mcp-hub", "config.yaml"),
+			}
+		}
+	}
+	return []string{
+		filepath.Join(home, ".config", "mcp-hub", "config.yaml"),
+		filepath.Join(home, ".mcp-hub", "config.yaml"),
+	}
+}
+
+func defaultConfigBaseDir(home string) string {
+	if runtime.GOOS == "windows" {
+		appdata := os.Getenv("APPDATA")
+		if appdata != "" {
+			return filepath.Join(appdata, "mcp-hub")
+		}
+	}
+	return filepath.Join(home, ".config", "mcp-hub")
 }
 
 func Load(path string) (Config, error) {
@@ -212,7 +237,8 @@ func (c *Config) applyDefaults() {
 		c.Hub.LogLevel = "info"
 	}
 	if c.Hub.LogFile == "" {
-		baseDir := filepath.Dir(defaultConfigPath())
+		home, _ := os.UserHomeDir()
+		baseDir := defaultConfigBaseDir(home)
 		c.Hub.LogFile = filepath.Join(baseDir, "hub.log")
 	}
 	if c.Servers == nil {
@@ -386,7 +412,7 @@ func defaultConfigPath() string {
 	if err != nil {
 		return filepath.Join(".config", "mcp-hub", "config.yaml")
 	}
-	return filepath.Join(home, ".config", "mcp-hub", "config.yaml")
+	return filepath.Join(defaultConfigBaseDir(home), "config.yaml")
 }
 
 func loadEnvironment(baseDir string) (map[string]string, error) {

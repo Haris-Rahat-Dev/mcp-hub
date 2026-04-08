@@ -100,4 +100,3 @@ func TestGenerateMergePreservesIDESpecificEntries(t *testing.T) {
 		t.Fatalf("expected generated hub entry")
 	}
 }
-

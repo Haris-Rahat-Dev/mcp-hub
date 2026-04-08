@@ -47,4 +47,3 @@ func (p *plannedServer) sessionIDs() []string { return nil }
 func (p *plannedServer) close() error { return nil }
 
 var _ serverRuntime = (*plannedServer)(nil)
-
